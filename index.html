@@ -2128,7 +2128,7 @@
       hands = new Hands({ locateFile: f => new URL('mediapipe/' + f, document.baseURI).href });
       hands.setOptions({ maxNumHands: 1, modelComplexity: 0, minDetectionConfidence: 0.5, minTrackingConfidence: 0.5 });
       hands.onResults(onHandResults);
-      handSendLoop();
+      gestureBtn.textContent = '手势（加载模型…）'; await withTimeout(hands.send({ image: handVideo }), 45000, '模型加载超时（网络慢）'); if (gen !== handGen || !handEnabled) return; gestureBtn.textContent = '手势'; handSendLoop();   // 网站版：首次 send 触发模型下载，超时/失败要明确告知，不能静默
     } catch (e) {
       if (gen !== handGen || !handEnabled) { abort(); return; }   // 已被关闭/重开接管，不覆盖新状态
       abort();
