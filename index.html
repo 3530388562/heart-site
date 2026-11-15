@@ -2089,6 +2089,22 @@
       p.then(v => { clearTimeout(id); resolve(v); }, e => { clearTimeout(id); reject(e); });
     });
   }
+  // 网站版：模型取源自动择优。GitHub Pages 在国内常年几十 KB/s 且只缓存 10 分钟，
+  //   每次重进都要重下 8 MB；jsDelivr 走同一仓库但有多地节点、缓存 7 天。
+  //   550 字节探针测可达性与延迟，不通或超过 2.5 秒就回落到本站目录（不做单点依赖）。
+  let MP_BASE = null;
+  async function mpBase() {
+    if (MP_BASE) return MP_BASE;
+    const local = new URL('mediapipe/', document.baseURI).href;
+    const cdn = 'https://cdn.jsdelivr.net/gh/3530388562/heart-site@main/mediapipe/';
+    try {
+      const t0 = Date.now();
+      const r = await withTimeout(fetch(cdn + 'hands.binarypb', { cache: 'no-store' }), 4000, '探测超时');
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      MP_BASE = (Date.now() - t0 < 2500) ? cdn : local;
+    } catch (_) { MP_BASE = local; }
+    return MP_BASE;
+  }
   async function enableGesture() {
     const gen = ++handGen;
     let video = null, stream = null;
@@ -2103,8 +2119,9 @@
     gestureBtn.classList.add('on');
     try {
       if (typeof Hands === 'undefined') {
-        // 模型随站点同目录托管：用相对当前页面的绝对 URL 加载，完全离线，不请求任何第三方 CDN
-        await withTimeout(loadScript(new URL('mediapipe/hands.js', document.baseURI).href), 12000, '模型加载超时');
+        // 模型随站点同目录托管；网站版可自动改用 jsDelivr 加速（同仓库），不通则回落本站目录
+        const base = await mpBase();   // 先定取源，再加载 hands.js（两者必须同源，否则 locateFile 拼错）
+        await withTimeout(loadScript(base + 'hands.js'), 12000, '模型加载超时');
         if (gen !== handGen || !handEnabled) return;
       }
       video = document.createElement('video');
@@ -2125,10 +2142,16 @@
       video.srcObject = stream;
       await withTimeout(video.play(), 8000, '视频启动超时');   // iOS 的 play() 可能永不 settle，包超时避免按钮永远卡住
       if (gen !== handGen || !handEnabled) { abort(); return; }   // play 挂起期间被关闭：不再创建 Hands
-      hands = new Hands({ locateFile: f => new URL('mediapipe/' + f, document.baseURI).href });
+      hands = new Hands({ locateFile: f => base + f });
       hands.setOptions({ maxNumHands: 1, modelComplexity: 0, minDetectionConfidence: 0.5, minTrackingConfidence: 0.5 });
       hands.onResults(onHandResults);
-      gestureBtn.textContent = '手势（加载模型…）'; await withTimeout(hands.send({ image: handVideo }), 45000, '模型加载超时（网络慢）'); if (gen !== handGen || !handEnabled) return; gestureBtn.textContent = '手势'; handSendLoop();   // 网站版：首次 send 触发模型下载，超时/失败要明确告知，不能静默
+      gestureBtn.textContent = '手势（加载模型…）';
+      let __sec = 0; const __tick = setInterval(() => { gestureBtn.textContent = '手势（加载模型 ' + (++__sec) + 's…）'; }, 1000);
+      // 网站版：首次 send 才真正下载 wasm/tflite（~8 MB）。给 150 秒 + 每秒刷新已等时长，
+      //   慢网能等到下完，而不是 45 秒被掐断、也不知道卡在哪里。
+      try { await withTimeout(hands.send({ image: handVideo }), 150000, '模型加载超时，请换 WiFi 再试'); } finally { clearInterval(__tick); }
+      if (gen !== handGen || !handEnabled) return;
+      gestureBtn.textContent = '手势'; handSendLoop();
     } catch (e) {
       if (gen !== handGen || !handEnabled) { abort(); return; }   // 已被关闭/重开接管，不覆盖新状态
       abort();
