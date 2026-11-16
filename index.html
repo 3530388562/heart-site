@@ -13,7 +13,7 @@
     font: 13px/1 -apple-system, system-ui, "PingFang SC", sans-serif; color: #fff;
     background: rgba(255,255,255,0.12); border: 1px solid rgba(255,255,255,0.25);
     padding: 9px 14px; border-radius: 20px; cursor: pointer;
-    -webkit-backdrop-filter: blur(4px); backdrop-filter: blur(4px); transition: background .15s;
+     transition: background .15s;
   }
   #panel button.on { background: rgba(255,120,170,0.88); border-color: rgba(255,150,190,0.95); }
   /* 下拉按钮（形成方式 / 重聚背景 / 动作）：点击展开子按钮 */
@@ -22,7 +22,7 @@
     font: 13px/1 -apple-system, system-ui, "PingFang SC", sans-serif; color: #fff;
     background: rgba(255,255,255,0.12); border: 1px solid rgba(255,255,255,0.25);
     padding: 9px 14px; border-radius: 20px; cursor: pointer;
-    -webkit-backdrop-filter: blur(4px); backdrop-filter: blur(4px); transition: background .15s;
+     transition: background .15s;
   }
   #panel .dropdown.open .dropbtn { background: rgba(255,120,170,0.88); border-color: rgba(255,150,190,0.95); }
   #panel .menu {
@@ -30,7 +30,7 @@
     flex-direction: column; gap: 6px; padding: 8px; min-width: 134px;
     border-radius: 16px; background: rgba(22,14,22,0.92);
     border: 1px solid rgba(255,255,255,0.22);
-    -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px);
+    
     box-shadow: 0 8px 28px rgba(0,0,0,.5);
   }
   #panel .dropdown.open .menu { display: flex; }
@@ -48,7 +48,7 @@
     font: 13px/1 -apple-system, system-ui, "PingFang SC", sans-serif; color: #fff;
     background: rgba(255,255,255,0.12); border: 1px solid rgba(255,255,255,0.25);
     padding: 8px 12px; border-radius: 16px;
-    -webkit-backdrop-filter: blur(4px); backdrop-filter: blur(4px); }
+     }
   #colorbox label { display: flex; align-items: center; gap: 5px; cursor: pointer; }
   #colorbox input[type="color"] { width: 30px; height: 24px; padding: 0; border: 1px solid rgba(255,255,255,.35);
     border-radius: 6px; background: none; cursor: pointer; }
@@ -70,7 +70,7 @@
   #hubDrawer { display:none; position:absolute; left:0; top:calc(100% + 10px); z-index:20;
     flex-wrap:wrap; gap:8px; padding:10px; max-width:96vw; border-radius:18px;
     background:rgba(22,14,22,0.94); border:1px solid rgba(255,255,255,0.22);
-    -webkit-backdrop-filter:blur(8px); backdrop-filter:blur(8px);
+    
     box-shadow:0 8px 28px rgba(0,0,0,.5); }
 </style>
 </head>
@@ -147,7 +147,7 @@
 
   function resize() {
     // 按设备像素比放大画布：高清屏（手机 DPR 2~3）上粒子才是锐利的，不再糊成一团
-    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    DPR = Math.min(window.devicePixelRatio || 1, (Math.min(window.innerWidth, window.innerHeight) < 820 ? 1.5 : 2));   // 网站版：手机上 2x 画布每帧要整张上传纹理，降到 1.5x 省 44% 像素
     W = window.innerWidth;
     H = window.innerHeight;
     const cw = Math.round(W * DPR), ch = Math.round(H * DPR);
@@ -1585,12 +1585,13 @@
     } else {
       const nDraw = drawList.length;
       const allOnScreen = lockedCount === nHeart;
+      let _lastRgb = '', _lastA = -1;   // 网站版：样式赋值去重
       for (let i = 0; i < nDraw; i++) {                    // ---- 颗粒：细沙小方粒（原效果） ----
         const p = drawList[i];
         const half = p._sz * 0.5;
         if (!allOnScreen && (p._sx + half < 0 || p._sx - half > W || p._sy + half < 0 || p._sy - half > H)) continue;
-        ctx.globalAlpha = p._a;
-        ctx.fillStyle = p._rgb;
+        if (p._a !== _lastA) { ctx.globalAlpha = p._a; _lastA = p._a; }   // 网站版：跳过重复的样式赋值
+        if (p._rgb !== _lastRgb) { ctx.fillStyle = p._rgb; _lastRgb = p._rgb; }
         ctx.fillRect(p._sx - half, p._sy - half, p._sz, p._sz);
       }
       ctx.globalAlpha = 1;
