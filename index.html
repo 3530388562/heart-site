@@ -2093,33 +2093,43 @@
   // 网站版：模型固定从本站同目录取。
   //   实测国内多数网络下 jsDelivr 各镜像会全线超时（连 550 字节探针都拿不到），
   //   而探针「碰巧通了」时大文件仍可能下不动 —— 这正是「按钮亮着 100 多秒没反应」的成因。
-  //   所以不再探测 CDN，改成：固定本站 + 用户开始操作页面后在后台预取，把 ~8 MB 提前拉进 HTTP 缓存。
+  //   所以不再探测 CDN，改成：固定本站 + 页面一打开就并发预取，把 ~12.8 MB 提前拉进 HTTP 缓存。
   // MP_BASE_URL 必须活在模块作用域：hands.js 已加载时不会再进 if 块，而 locateFile 回调是「之后」才执行的。
   //   （曾经写成 if 块内的 const base，导致 MediaPipe 一取模型就 ReferenceError: base is not defined）
   let MP_BASE_URL = new URL('mediapipe/', document.baseURI).href;
   async function mpBase() { return MP_BASE_URL; }
-  // 运行时真正会请求的 8 个文件：先小后大，hands.js 优先就绪
+  // 运行时真正会请求的 8 个文件，合计约 12.8 MB（并发下载，不再排先后）
   const MP_WARM_FILES = ['hands.binarypb', 'hands.js', 'hands_solution_packed_assets_loader.js',
     'hands_solution_simd_wasm_bin.js', 'hand_landmark_lite.tflite',
     'hands_solution_packed_assets.data', 'hands_solution_simd_wasm_bin.wasm',
     'hands_solution_simd_wasm_bin.data'];
-  let mpWarmStarted = false;
-  function mpWarm() {
-    if (mpWarmStarted || handEnabled || typeof Hands !== 'undefined') return;
-    mpWarmStarted = true;
-    (async () => {
-      for (const f of MP_WARM_FILES) {
-        if (handEnabled) return;   // 用户已点手势：交给 enableGesture，避免同一文件下载两遍
-        try {
-          const r = await fetch(MP_BASE_URL + f, { cache: 'force-cache' });
-          if (r.ok) { try { await r.arrayBuffer(); } catch (_) {} }   // 读完响应体才会写进缓存
-        } catch (_) { return; }   // 断网等异常：静默放弃，点手势时仍会自己加载
-      }
-    })();
+  let mpWarmPromise = null, mpWarmDone = 0, mpWarmBytes = 0;
+  async function mpFetch(f) {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const r = await fetch(MP_BASE_URL + f, { cache: 'force-cache' });
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        if (r.body && r.body.getReader) {
+          const rd = r.body.getReader();
+          for (;;) { const x = await rd.read(); if (x.done) break; if (x.value) mpWarmBytes += x.value.length; }
+        } else {
+          const ab = await r.arrayBuffer(); mpWarmBytes += ab.byteLength;
+        }
+        return;
+      } catch (_) { if (attempt) throw _; await new Promise(rs => setTimeout(rs, 1500)); }   // 断一次线自动重试
+    }
   }
-  // 页面加载 5 秒后自动开始预取：此时首屏动画已初始化完毕，不抢初始化带宽。
-  //   这样买家打开页面就先看着爱心，模型在后台慢慢下；等他想点「手势」时，往往已经下完。
-  setTimeout(mpWarm, 5000);
+  function mpWarm() {
+    if (mpWarmPromise) return mpWarmPromise;
+    // 8 个文件同时发：省掉 8 次串行握手/慢启动，浏览器允许多连接时还能叠加带宽。
+    //   不再判断 handEnabled：点手势后预取继续，enableGesture 会等它，绝不重复下载。
+    mpWarmPromise = Promise.all(MP_WARM_FILES.map(async f => {
+      try { await mpFetch(f); } catch (_) {} finally { mpWarmDone++; }
+    }));
+    return mpWarmPromise;
+  }
+  // 页面一打开就开始（不等 5 秒）：慢网下越早越好，动画初始化是本地计算，不抢这点带宽。
+  setTimeout(mpWarm, 600);
   async function enableGesture() {
     const gen = ++handGen;
     let video = null, stream = null;
@@ -2161,11 +2171,18 @@
       hands = new Hands({ locateFile: f => MP_BASE_URL + f });
       hands.setOptions({ maxNumHands: 1, modelComplexity: 0, minDetectionConfidence: 0.5, minTrackingConfidence: 0.5 });
       hands.onResults(onHandResults);
-      gestureBtn.textContent = '手势（加载模型…）';
-      let __sec = 0; const __tick = setInterval(() => { gestureBtn.textContent = '手势（加载模型 ' + (++__sec) + 's…）'; }, 1000);
-      // 网站版：首次 send 才真正下载 wasm/tflite（~8 MB）。给 150 秒 + 每秒刷新已等时长，
-      //   慢网能等到下完，而不是 45 秒被掐断、也不知道卡在哪里。
-      try { await withTimeout(hands.send({ image: handVideo }), 150000, '模型加载超时，请换 WiFi 再试'); } finally { clearInterval(__tick); }
+      gestureBtn.textContent = '手势（模型 0/' + MP_WARM_FILES.length + '）';
+      const __tick = setInterval(() => { gestureBtn.textContent = '手势（模型 ' + mpWarmDone + '/' + MP_WARM_FILES.length + ' · ' + (mpWarmBytes / 1048576).toFixed(1) + 'MB）'; }, 1000);
+      // 网站版：先等后台把 8 个文件全拉进缓存，再让 MediaPipe 初始化；
+      //   否则点手势会把正在下的文件重新下一次，慢网上等于时间翻倍。
+      //   实测 github.io 单连接 28~100 KB/s，12.8 MB 可能要 5~8 分钟 → 给 10 分钟。
+      try {
+        await withTimeout(mpWarm(), 600000, '模型下载超时，请换 WiFi 再试');
+        if (gen !== handGen || !handEnabled) return;
+        clearInterval(__tick);
+        gestureBtn.textContent = '手势（初始化…）';   // 8/8 还卡住 → 是 WASM/WebGL 问题，不是下载慢
+        await withTimeout(hands.send({ image: handVideo }), 300000, '初始化超时，请重开手势');
+      } finally { clearInterval(__tick); }
       if (gen !== handGen || !handEnabled) return;
       gestureBtn.textContent = '手势'; handSendLoop();
     } catch (e) {
