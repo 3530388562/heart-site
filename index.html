@@ -2089,25 +2089,36 @@
       p.then(v => { clearTimeout(id); resolve(v); }, e => { clearTimeout(id); reject(e); });
     });
   }
-  // 网站版：模型取源自动择优。GitHub Pages 在国内常年几十 KB/s 且只缓存 10 分钟，
-  //   每次重进都要重下 8 MB；jsDelivr 走同一仓库但有多地节点、缓存 7 天。
-  //   550 字节探针测可达性与延迟，不通或超过 2.5 秒就回落到本站目录（不做单点依赖）。
-  let MP_BASE = null;
+  // 网站版：模型固定从本站同目录取。
+  //   实测国内多数网络下 jsDelivr 各镜像会全线超时（连 550 字节探针都拿不到），
+  //   而探针「碰巧通了」时大文件仍可能下不动 —— 这正是「按钮亮着 100 多秒没反应」的成因。
+  //   所以不再探测 CDN，改成：固定本站 + 用户开始操作页面后在后台预取，把 ~8 MB 提前拉进 HTTP 缓存。
   // MP_BASE_URL 必须活在模块作用域：hands.js 已加载时不会再进 if 块，而 locateFile 回调是「之后」才执行的。
   //   （曾经写成 if 块内的 const base，导致 MediaPipe 一取模型就 ReferenceError: base is not defined）
   let MP_BASE_URL = new URL('mediapipe/', document.baseURI).href;
-  async function mpBase() {
-    if (MP_BASE) return MP_BASE;
-    const local = new URL('mediapipe/', document.baseURI).href;
-    const cdn = 'https://cdn.jsdelivr.net/gh/3530388562/heart-site@main/mediapipe/';
-    try {
-      const t0 = Date.now();
-      const r = await withTimeout(fetch(cdn + 'hands.binarypb', { cache: 'no-store' }), 4000, '探测超时');
-      if (!r.ok) throw new Error('HTTP ' + r.status);
-      MP_BASE = (Date.now() - t0 < 2500) ? cdn : local;
-    } catch (_) { MP_BASE = local; }
-    return MP_BASE;
+  async function mpBase() { return MP_BASE_URL; }
+  // 运行时真正会请求的 8 个文件：先小后大，hands.js 优先就绪
+  const MP_WARM_FILES = ['hands.binarypb', 'hands.js', 'hands_solution_packed_assets_loader.js',
+    'hands_solution_simd_wasm_bin.js', 'hand_landmark_lite.tflite',
+    'hands_solution_packed_assets.data', 'hands_solution_simd_wasm_bin.wasm',
+    'hands_solution_simd_wasm_bin.data'];
+  let mpWarmStarted = false;
+  function mpWarm() {
+    if (mpWarmStarted || handEnabled || typeof Hands !== 'undefined') return;
+    mpWarmStarted = true;
+    (async () => {
+      for (const f of MP_WARM_FILES) {
+        if (handEnabled) return;   // 用户已点手势：交给 enableGesture，避免同一文件下载两遍
+        try {
+          const r = await fetch(MP_BASE_URL + f, { cache: 'force-cache' });
+          if (r.ok) { try { await r.arrayBuffer(); } catch (_) {} }   // 读完响应体才会写进缓存
+        } catch (_) { return; }   // 断网等异常：静默放弃，点手势时仍会自己加载
+      }
+    })();
   }
+  // 页面加载 5 秒后自动开始预取：此时首屏动画已初始化完毕，不抢初始化带宽。
+  //   这样买家打开页面就先看着爱心，模型在后台慢慢下；等他想点「手势」时，往往已经下完。
+  setTimeout(mpWarm, 5000);
   async function enableGesture() {
     const gen = ++handGen;
     let video = null, stream = null;
@@ -2121,7 +2132,7 @@
     handEnabled = true;
     gestureBtn.classList.add('on');
     try {
-      MP_BASE_URL = await mpBase();   // 先定取源（hands.js 可能已缓存，不能只活在 if 里）
+      MP_BASE_URL = await mpBase();   // 固定本站同目录；hands.js 已缓存时也要保证基址有值
       if (gen !== handGen || !handEnabled) return;
       if (typeof Hands === 'undefined') {
         // 模型随站点同目录托管；网站版可自动改用 jsDelivr 加速（同仓库），不通则回落本站目录
