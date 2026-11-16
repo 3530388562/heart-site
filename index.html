@@ -2093,6 +2093,9 @@
   //   每次重进都要重下 8 MB；jsDelivr 走同一仓库但有多地节点、缓存 7 天。
   //   550 字节探针测可达性与延迟，不通或超过 2.5 秒就回落到本站目录（不做单点依赖）。
   let MP_BASE = null;
+  // MP_BASE_URL 必须活在模块作用域：hands.js 已加载时不会再进 if 块，而 locateFile 回调是「之后」才执行的。
+  //   （曾经写成 if 块内的 const base，导致 MediaPipe 一取模型就 ReferenceError: base is not defined）
+  let MP_BASE_URL = new URL('mediapipe/', document.baseURI).href;
   async function mpBase() {
     if (MP_BASE) return MP_BASE;
     const local = new URL('mediapipe/', document.baseURI).href;
@@ -2118,10 +2121,11 @@
     handEnabled = true;
     gestureBtn.classList.add('on');
     try {
+      MP_BASE_URL = await mpBase();   // 先定取源（hands.js 可能已缓存，不能只活在 if 里）
+      if (gen !== handGen || !handEnabled) return;
       if (typeof Hands === 'undefined') {
         // 模型随站点同目录托管；网站版可自动改用 jsDelivr 加速（同仓库），不通则回落本站目录
-        const base = await mpBase();   // 先定取源，再加载 hands.js（两者必须同源，否则 locateFile 拼错）
-        await withTimeout(loadScript(base + 'hands.js'), 12000, '模型加载超时');
+        await withTimeout(loadScript(MP_BASE_URL + 'hands.js'), 12000, '模型加载超时');
         if (gen !== handGen || !handEnabled) return;
       }
       video = document.createElement('video');
@@ -2142,7 +2146,7 @@
       video.srcObject = stream;
       await withTimeout(video.play(), 8000, '视频启动超时');   // iOS 的 play() 可能永不 settle，包超时避免按钮永远卡住
       if (gen !== handGen || !handEnabled) { abort(); return; }   // play 挂起期间被关闭：不再创建 Hands
-      hands = new Hands({ locateFile: f => base + f });
+      hands = new Hands({ locateFile: f => MP_BASE_URL + f });
       hands.setOptions({ maxNumHands: 1, modelComplexity: 0, minDetectionConfidence: 0.5, minTrackingConfidence: 0.5 });
       hands.onResults(onHandResults);
       gestureBtn.textContent = '手势（加载模型…）';
